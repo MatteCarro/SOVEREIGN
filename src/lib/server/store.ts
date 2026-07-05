@@ -54,33 +54,99 @@ export function summarize(doc: GameDoc): GameSummary {
   };
 }
 
-// ── Local JSON store ─────────────────────────────────────────────
+// ── Local store (in-memory + best-effort disk persistence) ───────
+//
+// A single Node process serves every request, so an in-memory Map is the
+// authoritative, always-coherent copy for local multiplayer. Disk writes
+// are best-effort persistence so games survive a restart. If the working
+// directory is read-only (serverless / Vercel / read-only container), the
+// store transparently falls back to /tmp, and if even that fails it runs
+// memory-only — it never throws a 500 because of the filesystem.
 
-const DATA_DIR = path.join(process.cwd(), ".data", "games");
+import os from "os";
 
-class LocalJsonStore implements GameStore {
-  /** Per-game promise chain = in-process mutex (single Node process). */
+const CANDIDATE_DIRS = [
+  path.join(process.cwd(), ".data", "games"),
+  path.join(os.tmpdir(), "sovereign-games"),
+];
+
+class LocalStore implements GameStore {
+  private cache = new Map<string, GameDoc>();
   private locks = new Map<string, Promise<unknown>>();
+  private dataDir: string | null = null;
+  /** Resolves once we've probed the filesystem for a writable dir. */
+  private ready: Promise<void>;
+  private hydrated = false;
 
-  private file(id: string): string {
-    if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error("Invalid game id");
-    return path.join(DATA_DIR, `${id}.json`);
+  constructor() {
+    this.ready = this.init();
   }
 
-  private async read(id: string): Promise<GameDoc | null> {
-    try {
-      const raw = await fs.readFile(this.file(id), "utf8");
-      return JSON.parse(raw) as GameDoc;
-    } catch {
-      return null;
+  private async init() {
+    for (const dir of CANDIDATE_DIRS) {
+      try {
+        await fs.mkdir(dir, { recursive: true });
+        await fs.access(dir);
+        // Probe an actual write — mkdir can succeed on some read-only mounts.
+        const probe = path.join(dir, ".probe");
+        await fs.writeFile(probe, "ok");
+        await fs.rm(probe, { force: true });
+        this.dataDir = dir;
+        break;
+      } catch {
+        /* try next candidate */
+      }
+    }
+    if (this.dataDir) {
+      await this.hydrate();
+    } else {
+      console.warn(
+        "[sovereign] Nessuna cartella scrivibile trovata: lo store gira in memoria (le partite non sopravvivono al riavvio). Configura Supabase per la persistenza.",
+      );
     }
   }
 
-  private async write(doc: GameDoc): Promise<void> {
-    await fs.mkdir(DATA_DIR, { recursive: true });
-    const tmp = this.file(doc.id) + ".tmp";
-    await fs.writeFile(tmp, JSON.stringify(doc), "utf8");
-    await fs.rename(tmp, this.file(doc.id));
+  /** Load persisted games into the cache on first start. */
+  private async hydrate() {
+    if (this.hydrated || !this.dataDir) return;
+    this.hydrated = true;
+    try {
+      const files = await fs.readdir(this.dataDir);
+      for (const f of files) {
+        if (!f.endsWith(".json")) continue;
+        try {
+          const raw = await fs.readFile(path.join(this.dataDir, f), "utf8");
+          const doc = JSON.parse(raw) as GameDoc;
+          if (!this.cache.has(doc.id)) this.cache.set(doc.id, doc);
+        } catch {
+          /* skip corrupt file */
+        }
+      }
+    } catch {
+      /* empty or unreadable dir */
+    }
+  }
+
+  private file(id: string): string | null {
+    if (!this.dataDir) return null;
+    if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error("Invalid game id");
+    return path.join(this.dataDir, `${id}.json`);
+  }
+
+  /** Best-effort persistence; downgrades to memory-only on failure. */
+  private async persist(doc: GameDoc): Promise<void> {
+    const target = this.file(doc.id);
+    if (!target) return;
+    try {
+      const tmp = target + ".tmp";
+      await fs.writeFile(tmp, JSON.stringify(doc), "utf8");
+      await fs.rename(tmp, target);
+    } catch (error) {
+      console.warn(
+        `[sovereign] Persistenza su disco non riuscita (${(error as Error).message}); proseguo in memoria.`,
+      );
+      this.dataDir = null; // stop trying; memory remains authoritative
+    }
   }
 
   private withLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
@@ -91,52 +157,42 @@ class LocalJsonStore implements GameStore {
   }
 
   async listPublicGames(): Promise<GameSummary[]> {
-    try {
-      const files = await fs.readdir(DATA_DIR);
-      const docs = await Promise.all(
-        files
-          .filter((f) => f.endsWith(".json"))
-          .map((f) => this.read(f.replace(/\.json$/, ""))),
-      );
-      return docs
-        .filter((d): d is GameDoc => Boolean(d) && d!.options.isPublic && d!.status !== "ended")
-        .map(summarize)
-        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-        .slice(0, 50);
-    } catch {
-      return [];
-    }
+    await this.ready;
+    return [...this.cache.values()]
+      .filter((d) => d.options.isPublic && d.status !== "ended")
+      .map(summarize)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, 50);
   }
 
   async getGame(id: string): Promise<GameDoc | null> {
-    return this.read(id);
+    await this.ready;
+    return this.cache.get(id) ?? null;
   }
 
   async findByInvite(code: string): Promise<GameDoc | null> {
-    try {
-      const files = await fs.readdir(DATA_DIR);
-      for (const f of files) {
-        if (!f.endsWith(".json")) continue;
-        const doc = await this.read(f.replace(/\.json$/, ""));
-        if (doc && doc.inviteCode === code.toUpperCase()) return doc;
-      }
-    } catch {
-      /* no data dir yet */
+    await this.ready;
+    const upper = code.toUpperCase();
+    for (const doc of this.cache.values()) {
+      if (doc.inviteCode === upper) return doc;
     }
     return null;
   }
 
   async createGame(doc: GameDoc): Promise<void> {
-    await this.write(doc);
+    await this.ready;
+    this.cache.set(doc.id, doc);
+    await this.persist(doc);
   }
 
   async updateGame<T>(id: string, mutate: (doc: GameDoc) => T | Promise<T>): Promise<T> {
+    await this.ready;
     return this.withLock(id, async () => {
-      const doc = await this.read(id);
+      const doc = this.cache.get(id);
       if (!doc) throw new StoreError("Partita non trovata.", 404);
       const result = await mutate(doc);
       doc.version += 1;
-      await this.write(doc);
+      await this.persist(doc);
       return result;
     });
   }
@@ -258,7 +314,7 @@ export function getStore(): GameStore {
   if (!globalThis.__sovereignStore) {
     globalThis.__sovereignStore = isSupabaseConfigured()
       ? new SupabaseStore()
-      : new LocalJsonStore();
+      : new LocalStore();
   }
   return globalThis.__sovereignStore;
 }

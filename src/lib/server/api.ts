@@ -19,7 +19,13 @@ export async function handle<T>(fn: () => Promise<T>): Promise<NextResponse> {
       );
     }
     console.error("[sovereign] API error:", error);
-    return NextResponse.json({ error: "Errore interno del server." }, { status: 500 });
+    // In development, surface the real message so failures are diagnosable
+    // instead of an opaque 500. Production keeps a generic message.
+    const detail =
+      process.env.NODE_ENV !== "production" && error instanceof Error
+        ? `Errore interno del server: ${error.message}`
+        : "Errore interno del server.";
+    return NextResponse.json({ error: detail }, { status: 500 });
   }
 }
 
