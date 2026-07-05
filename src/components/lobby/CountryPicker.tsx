@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Search, Check, Crown, Copy, Play, Users } from "lucide-react";
+import { Search, Check, Crown, Copy, Play, Users, Info } from "lucide-react";
 import { GameView } from "@/lib/view";
 import { WorldMap } from "@/components/map/WorldMap";
 import { Button } from "@/components/ui/button";
@@ -98,6 +98,24 @@ export function CountryPicker({ view }: { view: GameView }) {
       {error && (
         <div className="border-b border-danger/30 bg-danger/10 px-4 py-1.5 text-xs text-danger">{error}</div>
       )}
+
+      {/* First-step guidance banner */}
+      <div className="flex items-center gap-2 border-b border-border bg-info/5 px-4 py-2 text-[11px] text-muted">
+        <Info size={13} className="shrink-0 text-info" />
+        {view.myCountryId ? (
+          <span>
+            Hai scelto <span className="text-foreground">{view.countries[view.myCountryId]?.name}</span>.{" "}
+            {isHost
+              ? "Quando tutti hanno scelto un paese, premi «Avvia partita» qui in alto."
+              : "Attendi che l'host avvii la partita. Puoi cambiare paese finché non inizia."}
+          </span>
+        ) : (
+          <span>
+            <span className="text-foreground">Passo 3:</span> clicca un paese sulla mappa (o cercalo nella lista) e
+            premi «Guida [paese]». Condividi il codice <span className="font-mono text-accent">{view.inviteCode}</span> per invitare altri.
+          </span>
+        )}
+      </div>
 
       <div className="grid flex-1 lg:grid-cols-[280px_1fr_320px] lg:overflow-hidden">
         {/* Country list */}

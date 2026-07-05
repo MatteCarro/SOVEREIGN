@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Landmark, Map as MapIcon, Newspaper, X } from "lucide-react";
+import { Landmark, Map as MapIcon, Newspaper, X, HelpCircle } from "lucide-react";
 import { GameView } from "@/lib/view";
 import { useGameStore } from "@/lib/client/gameStore";
 import { WorldMap } from "@/components/map/WorldMap";
@@ -13,6 +13,8 @@ import { RightSidebar } from "./RightSidebar";
 import { ActionDrawer } from "./ActionDrawer";
 import { TurnResolutionModal } from "./TurnResolutionModal";
 import { CountryComparisonModal } from "./CountryComparisonModal";
+import { OnboardingTour, hasSeenTour } from "./OnboardingTour";
+import { HowToPlayDialog } from "@/components/guide/HowToPlayDialog";
 import { CountryPanel } from "./CountryPanel";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -27,6 +29,17 @@ export function GameScreen({ view }: { view: GameView }) {
     mapMode, setMapMode, selectedCountryId, selectCountry,
     mobilePanel, setMobilePanel, error, setError,
   } = useGameStore();
+
+  const [showTour, setShowTour] = React.useState(false);
+  const [showGuide, setShowGuide] = React.useState(false);
+
+  // Auto-show the onboarding tour on the player's first game entry.
+  React.useEffect(() => {
+    if (view.myCountryId && !hasSeenTour()) {
+      const timer = setTimeout(() => setShowTour(true), 700);
+      return () => clearTimeout(timer);
+    }
+  }, [view.myCountryId]);
 
   const mapData = {
     countries: view.countries,
@@ -128,6 +141,18 @@ export function GameScreen({ view }: { view: GameView }) {
 
       <TurnResolutionModal view={view} />
       <CountryComparisonModal view={view} />
+      <OnboardingTour open={showTour} onClose={() => setShowTour(false)} />
+      <HowToPlayDialog open={showGuide} onClose={() => setShowGuide(false)} />
+
+      {/* Floating help button: reopen the tutorial / guide anytime */}
+      <button
+        onClick={() => setShowGuide(true)}
+        className="fixed bottom-16 right-3 z-40 flex h-9 w-9 items-center justify-center rounded-full border border-border-strong bg-panel/90 text-muted shadow-lg backdrop-blur hover:text-accent lg:bottom-3 lg:right-14"
+        title="Come si gioca"
+        aria-label="Come si gioca"
+      >
+        <HelpCircle size={16} />
+      </button>
     </div>
   );
 }
